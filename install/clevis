@@ -6,17 +6,14 @@ build() {
     add_binary "tr"
     add_binary "grep"
     add_binary "sed"
+    add_binary "curl"
 
-    for _LIBRARY in /usr/bin/clevis*; do
+    for _LIBRARY in /usr/bin/clevis* /usr/bin/tpm2*; do
         add_binary "${_LIBRARY}"
     done
 
     add_binary "jose"
     add_binary "luksmeta"
-    add_binary "tpm2_createprimary"
-    add_binary "tpm2_load"
-    add_binary "tpm2_unseal"
-    add_binary "tpm2_flushcontext"
 
     for _LIBRARY in /usr/lib/libtss2-tcti-device.so*; do
         if [ -e "${_LIBRARY}" ]; then
@@ -29,11 +26,13 @@ build() {
 
 help() {
     cat <<HELPEOF
-This hook will attempt to decrypt the LUKS devices with TPM using clevis.
-To create a binding, use the following command:
-# clevis luks bind -d /dev/nvme0n1p2 tpm2 '{"pcr_bank":"sha256","pcr_ids":"0,1,7"}'
+This hook allows decryption of multiple LUKS devices automatically via
+clevis/TPM and/or by passphrase. To use, add kernel parameters with the format
+'cryptdevice=DEVICE:NAME:OPTIONS' for each device to be unlocked. For example,
 
-If your configuration changed, you will have to unbind and bind again.
+cryptdevice=PARTUUID=22ea7485-1688-48ef-83c8-452feb21d18b:root:discard
+
+Options may be left blank and currently the only supported option is discard.
 HELPEOF
 }
 

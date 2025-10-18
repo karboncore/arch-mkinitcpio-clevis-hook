@@ -1,43 +1,172 @@
 #!/usr/bin/ash
 
-run_hook() {
-    modprobe -a -q dm-crypt >/dev/null 2>&1
-    [ "${quiet}" = "y" ] && CSQUIET=">/dev/null"
+# Rewrites crypt options from the kernel command line to a format cryptsetup open accepts
+read_options() {
+  local OPT
 
-    if [ -n "${cryptdevice}" ]; then
-        IFS=: read cryptdev cryptname cryptoptions <<EOF
-$cryptdevice
-EOF
-    fi
-
-    # This may happen if third party hooks do the crypt setup
-    if [ -b "/dev/mapper/${cryptname}" ]; then
-        echo "Device ${cryptname} already exists, not doing any crypt setup."
-        return 0
-    fi
-
-    if resolved=$(resolve_device "${cryptdev}" ${rootdelay}); then
-        if cryptsetup isLuks ${resolved} >/dev/null 2>&1; then
-            # /dev/fd missing somehow
-            [ ! -d /dev/fd ] && ln -s /proc/self/fd /dev/
-            echo ""
-            echo "Attempting to unlock ${resolved} with TPM..."
-
-            if ! clevis-luks-unlock -d ${resolved} -n ${cryptname}; then
-                err "TPM unlock failed."
-                return 1
-            fi
-
-            echo "TPM unlock succeeded."
-
-            if [ ! -e "/dev/mapper/${cryptname}" ]; then
-                err "${cryptname} creation failed, aborting..."
-                return 1
-            fi
-        else
-            err "Failed to open encryption mapping: The device ${cryptdev} is not a LUKS volume and the crypto= paramater was not specified."
-        fi
-    fi
+  for OPT in ${1//,/ }; do
+    case ${OPT} in
+      allow-discards|discard) printf " --allow-discards"                ;;
+      *) echo "encryption option '${OPT}' not currently supported" >&2  ;;
+    esac
+  done
 }
 
-# vim: set ft=sh ts=4 sw=4 et:
+regen_binding() {
+  local SLOT PIN CFG line
+  local DEV=$1
+  local KEY="$2"
+
+  # Traverse all tpm2 bound slots
+  while read line; do
+
+    # Parse configuration
+    read SLOT PIN CFG <<EOF
+$line
+EOF
+    SLOT=${SLOT:0:1}
+    CFG=${CFG//\'/}
+
+    if [ -z "${PIN}" ] || [ -z "${CFG}" ]; then
+      echo "invalid configuration for ${DEV}:${SLOT}" >&2
+      return 1
+    fi
+
+    # Now regenerate the binding
+    if ! bash -c ". clevis-luks-common-functions; clevis_luks_do_bind \
+            '${DEV}' '${SLOT}' \"\" '${PIN}' '${CFG}' '-y' 'overwrite' '${KEY}' "; then
+      echo "unable to regenerate binding for ${DEV}:${SLOT}" >&2
+      return 2
+    fi
+    echo "binding for ${DEV} regenerated successfully" >&2
+
+  done < <(clevis-luks-list -d ${DEV} | grep ^.': tpm2')
+}
+
+unlock_passphrase() {
+  local KEY
+  local DEV=$1
+  local NAME=$2
+  local OPTS="$3"
+
+  # Loop until we get a valid password
+  while true; do
+
+    # Test previous passwords first
+    for KEY in ${KEYS}; do
+      if printf '%s' "${KEY}" | cryptsetup open --test-passphrase ${DEV}; then
+        break 2
+      fi
+    done
+
+    # Ask for password
+    while true; do
+      echo -n "enter passphrase for encrypted volume ${DEV}: "
+      read -r -s KEY
+      echo
+
+      # Leave password blank to skip unlocking
+      if [ -z ${KEY} ]; then
+        return 1
+      fi
+
+      # Test key and add to keyring
+      if printf '%s' "${KEY}" | cryptsetup open --test-passphrase ${DEV}; then
+        KEYS="${KEYS} ${KEY}"
+        break 2
+      else
+        unset KEY
+      fi
+      sleep 3
+    done
+  done
+
+  # Unlock drive
+  printf '%s' "${KEY}" | cryptsetup open --type luks ${DEV} ${NAME} ${OPTS}
+
+  # Ask to regenerate TPM key
+  if [ "$4" == REGEN ]; then
+    if [ "${ANS}" != REBIND ]; then
+      echo -n "regenerate TPM key? (y/N/all) "
+      read -r ANS
+      case ${ANS} in
+        y|Y|yes|YES) true               ;;
+        a|A|all|ALL) ANS=REBIND         ;;
+        *)           return 0           ;;
+      esac
+    fi
+    regen_binding ${DEV} "${KEY}"
+  fi
+}
+
+unlock_tpm2() {
+  local DEV=$1
+  local NAME=$2
+  local OPTS="$3"
+
+  if ! clevis-luks-unlock -d ${DEV} -n ${NAME} ${OPTS:+-o "${OPTS}"} 2>/dev/null; then
+    return 1
+  fi
+  echo "volume ${DEV} decrypted by TPM"
+}
+
+unlock_device() {
+  local DEV
+  local NAME=$2
+  local OPTS="$(read_options $3)"
+
+  # Test if device already exists
+  if [ -b "/dev/mapper/${NAME}" ]; then
+    echo "device ${NAME} already exists; skipping"
+    return 0
+
+  # Resolve device path
+  elif ! DEV=$(resolve_device "$1" ${rootdelay}); then
+    err "failed to resolve device ${DEV}" >&2
+    return 1
+
+  # Test if a LUKS device
+  elif ! cryptsetup isLuks ${DEV} >/dev/null 2>&1; then
+    err "device ${DEV} is not a LUKS volume" >&2
+    return 2
+
+  # Test if device has a TPM2 key
+  elif clevis-luks-list -d ${DEV} | grep -q ^.': tpm2'; then
+    if ! unlock_tpm2 ${DEV} ${NAME} "${OPTS}"; then
+      unlock_passphrase ${DEV} ${NAME} "${OPTS}" REGEN
+    fi
+
+  # If not, open by passphrase
+  else
+    unlock_passphrase ${DEV} ${NAME} "${OPTS}"
+  fi
+
+  # Confirm creation or return error
+  if [ ! -b "/dev/mapper/${NAME}" ]; then
+    err "failed to unlock ${NAME}" >&2
+    return 3
+  fi
+}
+
+run_hook() {
+  local PARAM cryptdevice cryptdevices cryptdev cryptname cryptoptions
+
+  # Load module
+  modprobe -a -q dm-crypt >/dev/null 2>&1
+
+  # Collect all cryptdevice= entries
+  for PARAM in $(cat /proc/cmdline); do
+    case "${PARAM}" in
+      cryptdevice=*) cryptdevices="${cryptdevices} ${PARAM#cryptdevice=}" ;;
+    esac
+  done
+
+  # Parse cryptdevice and unlock
+  for PARAM in ${cryptdevices}; do
+    IFS=: read cryptdev cryptname cryptoptions <<EOF
+$PARAM
+EOF
+    unlock_device "${cryptdev}" "${cryptname}" "${cryptoptions}"
+    unset cryptdev cryptname cryptoptions
+  done
+}

@@ -1,41 +1,16 @@
 # Introduction
 
----
-**Update: Starting with systemd version 248, TPM2 unlock support is built-in and it is much faster than clevis. Follow [this](https://wiki.archlinux.org/title/Trusted_Platform_Module#systemd-cryptenroll) guide to get it working.**
+A simple mkinitcpio hook to unlock LUKS devices on boot using TPM and `clevis`.
 
-**Update 2: Do not attempt to use the systemd version of TPM2 unlock if you don't use systemd.**
+Inspired by [arch-mkinitcpio-clevis-hook](https://github.com/kishorviswanathan/arch-mkinitcpio-clevis-hook?tab=readme-ov-file), with the following new features added:
+* Multi-device encrypted root partitions are supported - unlock several devices at boot by using multiple cryptdevice= kernel parameters
+* Fall back to passphrase prompt when TPM key is invalid or absent
+* Offer to regenerate clevis/TPM keys when needed
+* Allow mounting with the discard option
 
----
-
-A simple hook to unlock LUKS devices on boot using TPM and `clevis`.
-
-Tested Systems:
-* Manjaro Linux 20.2.1 with `systemd-boot` and `mkinitcpio`.
-* Artix Linux OpenRC (Linux 5.17.4-artix1-1) with `grub` and `mkinitcpio`.
-* Arch Linux (Linux 5.17.4.arch1-1) with `grub` and `mkinitcpio`.
+Tested on Artix Linux and should work on Arch and Arch derivatives.
 
 # Installing
-
-## AUR Method
-
-1. Install the `mkinitcpio-clevis-hook` package from the AUR (this installs all dependencies, as well as the hook).
-2. Add `clevis` binding to your LUKS device.
-    ```sh
-    sudo clevis luks bind -d <device> tpm2 '{"pcr_ids":"0,1,2,3,4,5,6,7"}'
-    ```
-3. Enable the `clevis` hook.
-    ```sh
-    sudo vim /etc/mkinitcpio.conf
-    # Edit the hooks and add clevis before the 'encrypt' hook. Eg:
-    # HOOKS=(.. clevis encrypt ..)
-    ```
-
-    Note: If you are using `plymouth`, replace the `plymouth-encrypt` hook with `encrypt`. `plymouth-encrypt` is reported to be buggy when the device is already unlocked. [More info.](https://github.com/kishorv06/arch-mkinitcpio-clevis-hook/issues/1)
-4. Generate `initramfs` image.
-    ```sh
-    sudo mkinitcpio -P
-    ```
-5. Reboot.
 
 ## Manual Method
 
@@ -43,40 +18,35 @@ Tested Systems:
     ```sh
     sudo pacman --needed -S clevis tpm2-tools luksmeta libpwquality
     ```
-2. Add `clevis` binding to your LUKS device.
+2. Add a `clevis` binding to your LUKS device; for example,
     ```sh
-    sudo clevis luks bind -d <device> tpm2 '{"pcr_ids":"0,1,2,3,4,5,6,7"}'
+    sudo clevis luks bind -d /dev/nvme0n1p1 tpm2 '{"pcr_ids":"0,2,5,8"}'
     ```
+    For an explanation of the different PCR registers you can choose from, see [Accessing PCR registers](https://wiki.archlinux.org/title/Trusted_Platform_Module#Accessing_PCR_registers).
 3. Install the `clevis` hook.
     ```sh
     sudo ./install.sh
-    sudo vim /etc/mkinitcpio.conf
+    sudo nano /etc/mkinitcpio.conf
     # Edit the hooks and add clevis before the 'encrypt' hook. Eg:
     # HOOKS=(.. clevis encrypt ..)
     ```
-
-    Note: If you are using `plymouth`, replace the `plymouth-encrypt` hook with `encrypt`. `plymouth-encrypt` is reported to be buggy when the device is already unlocked. [More info.](https://github.com/kishorv06/arch-mkinitcpio-clevis-hook/issues/1)
-4. Generate `initramfs` image.
+4. Regenerate the `initramfs` image.
     ```sh
     sudo mkinitcpio -P
     ```
-5. Reboot.
+5. Add kernel parameters with the format `cryptdevice=DEVICE:NAME:OPTIONS` for each device to be unlocked. For example,
+    ```sh
+    cryptdevice=PARTUUID=22ea7485-1688-48ef-83c8-452feb21d18b:root:discard
+    ```
+   Options may be left blank and currently the only supported option is discard.
+6. Reboot.
+
+7. Once happy, you can consider adding disablehooks=encrypt to your kernel command line. However keep encrypt in the mkinitcpio.conf hooks array to ensure that all dependencies get included.
 
 # Updating
 
-If you have updated any of the settings in BIOS, changed anything in the kernel options, you have to recreate the  `clevis` binding as TPM will not be able to unlock the device.
-
-```sh
-sudo clevis luks unbind -d <device> -s <slot-id>
-sudo clevis luks bind -d <device> tpm2 '{"pcr_ids":"0,1,2,3,4,5,6,7"}'
-```
-
-NOTE: `slot-id` is normally 1, but this can be checked by running `sudo cryptsetup luksDump <encrypted device>`
+When the PCR registers change, typically due to changed BIOS settings or kernel options, the TPM key will become invalid. On next boot you will be prompted to unlock via passphrase, and the hook will offer to regenerate the TPM key, at your discretion.
 
 # Troubleshooting
 
-Usually unlocking fails only when any of the TPM registers were updated as part of a system configuration change. Try rebooting the system and re adding the `clevis` LUKS binding. In most cases this should fix the issue. Feel free to create an issue if your problem is not resolved.
-
-# Credits
-
-Forked from [arch-clevis](https://gitlab.com/cosandr/arch-clevis) by [Andrei Costescu](https://gitlab.com/cosandr). I just simplified, fixed some bugs & added a clear readme, and @SimPilotAdamT just adapted it so this can be used in the AUR for easier install and uninstall.
+Please report any issues and also let me know if this works for you!
