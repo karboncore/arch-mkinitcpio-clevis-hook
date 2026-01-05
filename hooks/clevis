@@ -44,7 +44,7 @@ EOF
 }
 
 unlock_passphrase() {
-  local KEY
+  local KEY PRE
   local DEV=$1
   local NAME=$2
   local OPTS="$3"
@@ -55,6 +55,7 @@ unlock_passphrase() {
     # Test previous passwords first
     for KEY in ${KEYS}; do
       if printf '%s' "${KEY}" | cryptsetup open --test-passphrase ${DEV}; then
+        PRE=" for ${DEV}"
         break 2
       fi
     done
@@ -82,17 +83,18 @@ unlock_passphrase() {
   done
 
   # Unlock drive
-  printf '%s' "${KEY}" | cryptsetup open --type luks ${DEV} ${NAME} ${OPTS}
+  printf '%s' "${KEY}" | cryptsetup open --type luks ${DEV} ${NAME} ${OPTS} || return $?
 
   # Ask to regenerate TPM key
-  if [ "$4" == REGEN ]; then
+  if [ "$4" == REGEN ] && [ "${ANS}" != SKIP ]; then
     if [ "${ANS}" != REBIND ]; then
-      echo -n "regenerate TPM key? (y/N/all) "
+      echo -n "regenerate TPM key${PRE}? (y/N/All/nOne) "
       read -r ANS
       case ${ANS} in
-        y|Y|yes|YES) true               ;;
-        a|A|all|ALL) ANS=REBIND         ;;
-        *)           return 0           ;;
+        y|Y|yes|YES|Yes)    true                ;;
+        a|A|all|ALL|All)    ANS=REBIND          ;;
+        o|O|none|NONE|None) ANS=SKIP; return 0  ;;
+        *)                  return 0            ;;
       esac
     fi
     regen_binding ${DEV} "${KEY}"
