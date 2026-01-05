@@ -22,7 +22,7 @@ regen_binding() {
 
     # Parse configuration
     read SLOT PIN CFG <<EOF
-$line
+${line}
 EOF
     SLOT=${SLOT:0:1}
     CFG=${CFG//\'/}
@@ -162,11 +162,12 @@ run_hook() {
   done
 
   # Parse cryptdevice and unlock
-  for PARAM in ${cryptdevices}; do
+  for cryptdevice in ${cryptdevices}; do
     IFS=: read cryptdev cryptname cryptoptions <<EOF
-$PARAM
+${cryptdevice}
 EOF
     unlock_device "${cryptdev}" "${cryptname}" "${cryptoptions}"
     unset cryptdev cryptname cryptoptions
   done
+  unset KEYS ANS
 }
